@@ -37,6 +37,11 @@ app.post("/api/payments/initiate", express.json(), async (req, res) => {
       return res.status(400).json({ success: false, message: "Moyen de paiement invalide." });
     }
 
+    // CamerPay facture toujours en XAF (Franc CFA), quelle que soit la devise
+    // envoyée. Le XAF est indexé à taux fixe sur l'euro : 1 EUR = 655.957 XAF.
+    const EUR_TO_XAF = 655.957;
+    const amountXaf = Math.round(amount * EUR_TO_XAF);
+
     const camerpayRes = await fetch(`${CAMERPAY_BASE}/payment/initiate`, {
       method: "POST",
       headers: {
@@ -44,8 +49,8 @@ app.post("/api/payments/initiate", express.json(), async (req, res) => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        amount,
-        currency: currency || "EUR",
+        amount: amountXaf,
+        currency: "XAF",
         payment_method: method, // "stripe" | "paypal"
         customer_name,
         customer_email,
