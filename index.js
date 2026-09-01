@@ -13,6 +13,11 @@ const {
   PORT = 4000,
 } = process.env;
 
+console.log(
+  "🔑 Token utilisé au démarrage :",
+  CAMERPAY_API_TOKEN ? `${CAMERPAY_API_TOKEN.slice(0, 6)}...${CAMERPAY_API_TOKEN.slice(-4)}` : "AUCUN TOKEN"
+);
+
 if (!CAMERPAY_API_TOKEN) {
   console.warn("⚠️  CAMERPAY_API_TOKEN manquant dans server/.env — les appels à CamerPay vont échouer.");
 }
@@ -41,6 +46,11 @@ app.post("/api/payments/initiate", express.json(), async (req, res) => {
     // envoyée. Le XAF est indexé à taux fixe sur l'euro : 1 EUR = 655.957 XAF.
     const EUR_TO_XAF = 655.957;
     const amountXaf = Math.round(amount * EUR_TO_XAF);
+
+console.log(
+  "🔑 Token utilisé pour cette requête :",
+  `${CAMERPAY_API_TOKEN.slice(0, 6)}...${CAMERPAY_API_TOKEN.slice(-4)}`
+);
 
     const camerpayRes = await fetch(`${CAMERPAY_BASE}/payment/initiate`, {
       method: "POST",
