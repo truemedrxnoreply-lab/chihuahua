@@ -1,34 +1,30 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import crypto from "crypto";
 
 const app = express();
 app.use(cors());
 
-const {
-  CAMERPAY_API_TOKEN,
-  CAMERPAY_CALLBACK_SECRET, // optionnel pour l'instant (pas de webhook en sandbox)
-  PUBLIC_BACKEND_URL = "https://example.com", // placeholder tant qu'on n'utilise pas le webhook
-  PORT = 4000,
-} = process.env;
+const { GENIUSPAY_API_KEY, GENIUSPAY_API_SECRET, PORT = 4000 } = process.env;
 
-console.log(
-  "🔑 Token utilisé au démarrage :",
-  CAMERPAY_API_TOKEN ? `${CAMERPAY_API_TOKEN.slice(0, 6)}...${CAMERPAY_API_TOKEN.slice(-4)}` : "AUCUN TOKEN"
-);
-
-if (!CAMERPAY_API_TOKEN) {
-  console.warn("⚠️  CAMERPAY_API_TOKEN manquant dans server/.env — les appels à CamerPay vont échouer.");
+if (!GENIUSPAY_API_KEY || !GENIUSPAY_API_SECRET) {
+  console.warn("⚠️  GENIUSPAY_API_KEY / GENIUSPAY_API_SECRET manquants dans server/.env");
 }
 
-const CAMERPAY_BASE = "https://camerpay.biz/api";
+const GENIUSPAY_BASE = "https://pay.genius.ci/api/v1/merchant/payments";
 
-// Stockage temporaire en mémoire, uniquement pour la démo/sandbox.
 const transactions = new Map();
 
+function geniusHeaders() {
+  return {
+    "X-API-Key": GENIUSPAY_API_KEY,
+    "X-API-Secret": GENIUSPAY_API_SECRET,
+    "Content-Type": "application/json",
+  };
+}
+
 // ---------------------------------------------------------------------------
-// POST /api/payments/initiate — crée une transaction CamerPay et renvoie pay_url
+// POST /api/payments/initiate
 // ---------------------------------------------------------------------------
 app.post("/api/payments/initiate", express.json(), async (req, res) => {
   try {
@@ -38,120 +34,69 @@ app.post("/api/payments/initiate", express.json(), async (req, res) => {
     if (!amount || amount <= 0) {
       return res.status(400).json({ success: false, message: "Montant invalide." });
     }
-    if (!["stripe", "paypal"].includes(method)) {
-      return res.status(400).json({ success: false, message: "Moyen de paiement invalide." });
-    }
 
-    // CamerPay facture toujours en XAF (Franc CFA), quelle que soit la devise
-    // envoyée. Le XAF est indexé à taux fixe sur l'euro : 1 EUR = 655.957 XAF.
-    const EUR_TO_XAF = 655.957;
-    const amountXaf = Math.round(amount * EUR_TO_XAF);
-
-console.log(
-  "🔑 Token utilisé pour cette requête :",
-  `${CAMERPAY_API_TOKEN.slice(0, 6)}...${CAMERPAY_API_TOKEN.slice(-4)}`
-);
-
-    const camerpayRes = await fetch(`${CAMERPAY_BASE}/payment/initiate`, {
+    const geniusRes = await fetch(GENIUSPAY_BASE, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${CAMERPAY_API_TOKEN}`,
-        "Content-Type": "application/json",
-      },
+      headers: geniusHeaders(),
       body: JSON.stringify({
-        amount: amountXaf,
-        currency: "XAF",
-        payment_method: method, // "stripe" | "paypal"
-        customer_name,
-        customer_email,
-        merchant_invoice_id: reference,
-        // Pas encore utilisé (pas de webhook en sandbox) — champ requis quand même par l'API.
-        merchant_callback_url: `${PUBLIC_BACKEND_URL}/api/payments/webhook`,
-        merchant_return_url: return_url,
-        source: "association-smoke-web",
+        amount,
+        currency: currency || "EUR",
+        payment_method: method, // "card" | "paypal"
+        description,
+        customer: { name: customer_name, email: customer_email },
+        success_url: return_url,
+        error_url: return_url,
+        metadata: { source: "association-smoke-web", reference },
       }),
     });
 
-    const data = await camerpayRes.json();
-    console.log("CamerPay initiate response:", camerpayRes.status, data);
+    const body = await geniusRes.json();
+    console.log("GeniusPay initiate response:", geniusRes.status, body);
 
-    if (!camerpayRes.ok || data.success === false) {
-      return res.status(camerpayRes.status).json(data);
+    if (!geniusRes.ok || body.success === false) {
+      return res.status(geniusRes.status).json(body);
     }
 
-    transactions.set(data.transaction_uuid, {
-      status: data.status,
-      reference,
-      amount,
-      currency: currency || "EUR",
-      method,
-      customer_email,
-      description,
-      createdAt: new Date().toISOString(),
-    });
+    const tx = body.data;
+    transactions.set(tx.reference, { status: tx.status, amount, currency: currency || "EUR", method });
 
-    res.json(data); // { success, transaction_uuid, status, pay_url, redirect_url }
+    res.json({
+      success: true,
+      reference: tx.reference,
+      pay_url: tx.payment_url || tx.checkout_url,
+      status: tx.status,
+    });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false, message: "Erreur serveur CamerPay." });
+    res.status(500).json({ success: false, message: "Erreur serveur GeniusPay." });
   }
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/payments/status/:uuid — vérifie le vrai statut auprès de CamerPay
-// (c'est notre méthode principale de confirmation tant qu'il n'y a pas de webhook)
+// GET /api/payments/status/:reference
 // ---------------------------------------------------------------------------
-app.get("/api/payments/status/:uuid", async (req, res) => {
+app.get("/api/payments/status/:reference", async (req, res) => {
   try {
-    const { uuid } = req.params;
+    const { reference } = req.params;
 
-    const camerpayRes = await fetch(`${CAMERPAY_BASE}/payment/${uuid}/status`, {
-      headers: { Authorization: `Bearer ${CAMERPAY_API_TOKEN}` },
+    const geniusRes = await fetch(`${GENIUSPAY_BASE}/${reference}`, {
+      headers: geniusHeaders(),
     });
 
-    const data = await camerpayRes.json();
-    console.log("CamerPay status response:", camerpayRes.status, data);
+    const body = await geniusRes.json();
+    console.log("GeniusPay status response:", geniusRes.status, body);
 
-    if (!camerpayRes.ok || data.success === false) {
-      return res.status(camerpayRes.status).json(data);
+    if (!geniusRes.ok || body.success === false) {
+      return res.status(geniusRes.status).json(body);
     }
 
-    const local = transactions.get(uuid);
-    if (local) {
-      transactions.set(uuid, { ...local, status: data.transaction.status });
-    }
-
-    res.json(data);
+    res.json({ success: true, transaction: body.data });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: "Erreur lors de la vérification du statut." });
   }
 });
 
-// ---------------------------------------------------------------------------
-// POST /api/payments/webhook — laissé en place pour plus tard (webhook indisponible en sandbox)
-// ---------------------------------------------------------------------------
-app.post("/api/payments/webhook", express.urlencoded({ extended: true }), (req, res) => {
-  if (!CAMERPAY_CALLBACK_SECRET) {
-    console.warn("Webhook reçu mais CAMERPAY_CALLBACK_SECRET non configuré — ignoré.");
-    return res.status(200).send("OK (non vérifié)");
-  }
-
-  const { uuid, invoice_id, status, amount, signature } = req.body;
-  const data = `${uuid}|${invoice_id}|${status}|${amount}`;
-  const expected = crypto.createHmac("sha256", CAMERPAY_CALLBACK_SECRET).update(data).digest("hex");
-
-  const sigBuffer = Buffer.from(signature || "");
-  const expectedBuffer = Buffer.from(expected);
-  if (sigBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(sigBuffer, expectedBuffer)) {
-    return res.status(401).send("Signature invalide");
-  }
-
-  const local = transactions.get(uuid) || {};
-  transactions.set(uuid, { ...local, status, updatedAt: new Date().toISOString() });
-  res.status(200).send("OK");
-});
-
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-app.listen(PORT, () => console.log(`✅ Backend CamerPay démarré sur http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`✅ Backend GeniusPay démarré sur http://localhost:${PORT}`));
